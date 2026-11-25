@@ -33,7 +33,8 @@ class MemoryDetector(private val database: FirebaseDatabase) {
           "category": "category_name",
           "title": "Short Title",
           "description": "Brief description of the event",
-          "importance": 1-10
+          "importance": 1-10,
+          "normalized_title": "Subject | Action | Object"
         }
         If nothing important happened:
         { "save": false }
@@ -89,7 +90,8 @@ class MemoryDetector(private val database: FirebaseDatabase) {
                             importance = json.optInt("importance", 5),
                             createdAt = System.currentTimeMillis(),
                             sourceMessage = userMsg,
-                            aiGenerated = true
+                            aiGenerated = true,
+                            normalizedTitle = json.optString("normalized_title", "")
                         )
                         Log.d("JourneyDebug", "STEP 5\nParsed Memory\nsave = true\ntitle = ${memory.title}\ndescription = ${memory.description}\ncategory = ${memory.category}\nimportance = ${memory.importance}")
                         Log.d("JourneyDebug", "--------------------------------")

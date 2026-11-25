@@ -3,9 +3,6 @@ package com.example.saathi.worker
 import android.content.Context
 import android.util.Log
 import androidx.work.CoroutineWorker
-import androidx.work.ExistingWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.example.saathi.data.LocalChatRepository
 import com.example.saathi.screens.ChatMessage
@@ -115,7 +112,8 @@ class InactivityWorker(
                         context = currentContext,
                         lastMsgDateStr = lastMsgDateStr,
                         currentDateStr = currentDateStr,
-                        timeDiffText = timeDiffText
+                        timeDiffText = timeDiffText,
+                        userId = userId
                     )
 
                     if (result != null && !result.reply.isNullOrBlank()) {
@@ -154,9 +152,6 @@ class InactivityWorker(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Inactivity worker error", e)
-        } finally {
-            // Re-enqueue work for periodic checking
-            scheduleNextMinuteCheck(appContext)
         }
 
         Result.success()
@@ -171,13 +166,34 @@ class InactivityWorker(
         }
     }
 
-    private fun generateCheckinReplyAndContext(
+    private suspend fun generateCheckinReplyAndContext(
         apiKeysSnapshot: com.google.firebase.database.DataSnapshot?,
         context: String,
         lastMsgDateStr: String,
         currentDateStr: String,
-        timeDiffText: String
+        timeDiffText: String,
+        userId: String = ""
     ): CheckinResult? {
+        // STEP A: Try Backend Server First
+        try {
+            val request = com.example.saathi.api.InactivityApiRequest(
+                userId = userId,
+                context = context,
+                lastUserMessageDate = lastMsgDateStr,
+                currentDate = currentDateStr,
+                timeDiffText = timeDiffText
+            )
+            val apiResponse = com.example.saathi.api.BackendClient.api.generateInactivityCheckin(request)
+            if (apiResponse.isSuccessful && apiResponse.body() != null) {
+                val body = apiResponse.body()!!
+                if (body.reply.isNotBlank()) {
+                    return CheckinResult(reply = body.reply, updatedContext = body.updatedContext)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Inactivity backend API call failed, using client failover keys", e)
+        }
+
         if (apiKeysSnapshot == null) return null
         val keysToTry = listOf("gemni_1", "gemni_2", "gemni_3", "grok_1", "grok_2")
         
@@ -245,23 +261,5 @@ class InactivityWorker(
             } catch (e: Exception) { }
         }
         return null
-    }
-
-    companion object {
-        fun scheduleNextMinuteCheck(context: Context) {
-            try {
-                val nextWorkRequest = OneTimeWorkRequestBuilder<InactivityWorker>()
-                    .setInitialDelay(1, TimeUnit.HOURS)
-                    .build()
-
-                WorkManager.getInstance(context).enqueueUniqueWork(
-                    "RahiInactivityMinuteCheck",
-                    ExistingWorkPolicy.REPLACE,
-                    nextWorkRequest
-                )
-            } catch (e: Exception) {
-                Log.e("InactivityWorker", "Error scheduling next minute check", e)
-            }
-        }
     }
 }

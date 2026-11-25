@@ -1,11 +1,13 @@
 package com.example.saathi.data
 
+import android.util.Log
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.database.FirebaseDatabase
 import kotlinx.coroutines.tasks.await
 import java.util.Locale
 
 class JourneyRepository {
+    private val TAG = "JourneyRepository"
     private val database = FirebaseDatabase.getInstance("https://saathi-5f51d-default-rtdb.firebaseio.com/")
     private val usersRef = database.getReference("users")
 
@@ -37,26 +39,82 @@ class JourneyRepository {
         }
     }
 
+    /**
+     * Calculates single-field similarity score (0.0 to 100.0) between two text strings.
+     * Rule 1: Exact Match = 100
+     * Rule 2: Substring Containment = 85
+     * Rule 3: Word Overlap Percentage
+     * Rule 4: No Match = 0
+     */
+    fun calculateFieldScore(text1: String, text2: String): Double {
+        val s1 = text1.lowercase(Locale.getDefault()).trim()
+        val s2 = text2.lowercase(Locale.getDefault()).trim()
+
+        if (s1.isEmpty() && s2.isEmpty()) return 50.0
+        if (s1.isEmpty() || s2.isEmpty()) return 0.0
+
+        // Rule 1: Exact Match
+        if (s1 == s2) return 100.0
+
+        // Rule 2: Substring Containment
+        if (s1.contains(s2) || s2.contains(s1)) return 85.0
+
+        // Rule 3: Word Overlap Percentage
+        val words1 = s1.split("\\s+".toRegex()).filter { it.length > 1 }
+        val words2 = s2.split("\\s+".toRegex()).filter { it.length > 1 }
+
+        if (words1.isEmpty() || words2.isEmpty()) return 0.0
+
+        val matchingWords = words1.count { words2.contains(it) }
+        val totalMaxWords = maxOf(words1.size, words2.size)
+
+        val overlapRatio = (matchingWords.toDouble() / totalMaxWords) * 100.0
+        return if (overlapRatio >= 30.0) overlapRatio else 0.0
+    }
+
+    /**
+     * Calculates weighted similarity score out of 100 between two Journey memories.
+     * Subject: 40% Weight
+     * Action: 40% Weight
+     * Object: 20% Weight
+     */
+    fun calculateSimilarityScore(m1: JourneyMemory, m2: JourneyMemory): Double {
+        // Fallback: If original title or source message is an exact match
+        if (m1.title.isNotBlank() && m1.title.equals(m2.title, ignoreCase = true)) return 100.0
+        if (m1.sourceMessage.isNotBlank() && m1.sourceMessage.equals(m2.sourceMessage, ignoreCase = true)) return 100.0
+
+        val subjectScore = calculateFieldScore(m1.subject, m2.subject)
+        val actionScore = calculateFieldScore(m1.action, m2.action)
+        val objectScore = calculateFieldScore(m1.objectTerm, m2.objectTerm)
+
+        val totalScore = (subjectScore * 0.40) + (actionScore * 0.40) + (objectScore * 0.20)
+        Log.d(TAG, "Similarity score between [${m1.normalizedTitle}] and [${m2.normalizedTitle}]: $totalScore (S:$subjectScore, A:$actionScore, O:$objectScore)")
+        return totalScore
+    }
+
+    /**
+     * Checks if a new Journey memory is a duplicate of an existing Journey memory in the SAME category.
+     */
+    fun isDuplicateJourney(newMemory: JourneyMemory, existingMemories: List<JourneyMemory>, threshold: Double = 75.0): Boolean {
+        val newCategoryNorm = normalizeCategory(newMemory.category)
+
+        // Filter existing memories to ONLY compare entries in the exact same category
+        val sameCategoryMemories = existingMemories.filter { existing ->
+            normalizeCategory(existing.category) == newCategoryNorm
+        }
+
+        return sameCategoryMemories.any { existing ->
+            calculateSimilarityScore(newMemory, existing) >= threshold
+        }
+    }
+
     suspend fun saveJourneyMemory(userId: String, memory: JourneyMemory): Boolean {
         return try {
             val existingMemories = getJourneyMemories(userId)
-            
-            val newTitleNorm = memory.title.lowercase(Locale.getDefault()).trim()
-            val newSourceNorm = memory.sourceMessage.lowercase(Locale.getDefault()).trim()
 
-            // Duplicate Guard: Check if the same achievement/title or source message is already saved
-            val isDuplicate = existingMemories.any { existing ->
-                val exTitleNorm = existing.title.lowercase(Locale.getDefault()).trim()
-                val exSourceNorm = existing.sourceMessage.lowercase(Locale.getDefault()).trim()
-
-                exTitleNorm == newTitleNorm ||
-                (newSourceNorm.isNotBlank() && exSourceNorm == newSourceNorm) ||
-                (exTitleNorm.contains(newTitleNorm) && newTitleNorm.length > 5) ||
-                (newTitleNorm.contains(exTitleNorm) && exTitleNorm.length > 5)
-            }
-
-            if (isDuplicate) {
-                // Already saved in Journey! Prevent duplicate entry.
+            // Duplicate Guard: Run weighted 3-field comparison algorithm
+            if (isDuplicateJourney(memory, existingMemories, threshold = 75.0)) {
+                Log.d(TAG, "Duplicate Journey memory detected for title: '${memory.title}'. Skipping save to Firebase.")
                 return true
             }
 
@@ -73,6 +131,7 @@ class JourneyRepository {
             newMemoryRef.setValue(finalMemory).await()
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Error saving Journey memory", e)
             false
         }
     }

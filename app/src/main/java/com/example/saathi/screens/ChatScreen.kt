@@ -51,7 +51,9 @@ data class ChatMessage(
     val timestamp: Long = 0,
     val replyToId: String? = null,
     val journeyTitle: String? = null,
-    val journeyImportance: Int? = null
+    val journeyImportance: Int? = null,
+    val journeySimilarityScore: Double? = null,
+    val journeyIsDuplicate: Boolean? = null
 )
 
 @Composable
@@ -80,7 +82,10 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
 
+//    I achieved an outstanding grade in Java.
+//    I scored O grade in my Java examination.
     // Refresh Local + Cloud messages whenever ChatViewModel saves a new message
+
     LaunchedEffect(messageEvent) {
         if (messageEvent > 0L) {
             val localList = localChatRepo.getLocalMessages(userId)
@@ -630,10 +635,15 @@ fun ChatBubble(
 
                     if (message.journeyTitle != null) {
                         Spacer(modifier = Modifier.height(6.dp))
+                        val isDup = message.journeyIsDuplicate == true
+                        val badgeBg = if (isDup) Color(0xFFFFEBEE) else Color(0xFFFFF8E1)
+                        val badgeBorder = if (isDup) Color(0xFFEF5350).copy(alpha = 0.4f) else Color(0xFFFFB300).copy(alpha = 0.4f)
+                        val textColor = if (isDup) Color(0xFFC62828) else Color(0xFFE65100)
+
                         Surface(
-                            color = Color(0xFFFFF8E1),
+                            color = badgeBg,
                             shape = RoundedCornerShape(10.dp),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFFB300).copy(alpha = 0.4f)),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, badgeBorder),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
@@ -645,17 +655,17 @@ fun ChatBubble(
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "🌟 Journey Milestone",
+                                        text = if (isDup) "⚠️ Milestone Already Recorded" else "🌟 Journey Milestone",
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFFE65100)
+                                        color = textColor
                                     )
                                     if (message.journeyImportance != null) {
                                         Text(
                                             text = "⭐ ${message.journeyImportance}/10",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = Color(0xFFE65100)
+                                            color = textColor
                                         )
                                     }
                                 }
@@ -664,7 +674,7 @@ fun ChatBubble(
                                     text = "\"${message.journeyTitle}\"",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFFBF360C)
+                                    color = textColor
                                 )
                             }
                         }

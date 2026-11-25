@@ -1,8 +1,12 @@
 package com.example.saathi
 
 import android.app.Application
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import com.example.saathi.worker.InactivityWorker
 import com.google.firebase.database.FirebaseDatabase
+import java.util.concurrent.TimeUnit
 
 class SaathiApp : Application() {
     override fun onCreate() {
@@ -20,7 +24,12 @@ class SaathiApp : Application() {
 
     private fun scheduleInactivityCheckWorker() {
         try {
-            InactivityWorker.scheduleNextMinuteCheck(this)
+            val periodicWorkRequest = PeriodicWorkRequestBuilder<InactivityWorker>(1, TimeUnit.HOURS).build()
+            WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                "RahiPeriodicInactivityCheck",
+                ExistingPeriodicWorkPolicy.KEEP,
+                periodicWorkRequest
+            )
         } catch (e: Exception) {
             // Ignore error
         }

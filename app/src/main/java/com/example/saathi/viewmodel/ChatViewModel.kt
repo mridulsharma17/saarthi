@@ -44,7 +44,14 @@ You must process the current interaction and return ONLY a valid JSON object wit
 3. "entity_name": The primary PROPER NAME of the person or thing the user is talking about (e.g. "Rahul", "Ananya"). IMPORTANT: If the user only refers to a person by a generic role or title (like "crush", "friend", "boss", "ex", "brother", "sister", "mom"), return null for "entity_name". Do NOT use generic labels like "crush" or "friend" as the entity_name.
 4. "new_alias": If the user used a new name/nickname to refer to this entity, provide it here. Else null.
 5. "smart_memory": { "content": "Brief fact to remember about this entity", "importance": 1-10 }. Provide this ONLY if you learned something new and persistent. Else null.
-6. "journey": If an important life event occurred (academics/education, career, achievements, relationships), set "save": true and provide details. Use standard category values: "education", "career", "relationship", "achievement", "travel", or "milestone". Else set "save": false.
+6. "journey": If an important life event occurred (academics/education, career, achievements, relationships), set "save": true and provide details.
+   Include:
+   - "title": Original title
+   - "description": Brief description
+   - "category": Standard category ("education", "career", "relationship", "achievement", "travel", or "milestone")
+   - "importance": 1-10
+   - "normalized_title": Simplified title in exact format "Subject | Action | Object" (e.g., "Java | Achieved Outstanding Grade | Course")
+   Else set "save": false.
 
 OUTPUT FORMAT (JSON ONLY):
 {
@@ -58,7 +65,8 @@ OUTPUT FORMAT (JSON ONLY):
     "category": "...",
     "title": "...",
     "description": "...",
-    "importance": 1-10
+    "importance": 1-10,
+    "normalized_title": "Subject | Action | Object"
   }
 }
 """.trimIndent()
@@ -133,7 +141,6 @@ class ChatViewModel : ViewModel() {
                 } catch (e: Exception) {
                     DEFAULT_CONTEXT
                 }
-
                 // STEP 1: FIRST AI CALL (Extract Name, Relation, Other Names)
                 val extraction = identifyEntityDetails(message = userMsg.text, context = currentContext)
 
@@ -203,8 +210,39 @@ class ChatViewModel : ViewModel() {
                 val fullInputContext = currentContext + entityMemoriesText + timeContext + clarificationPrompt
                 val response = getUnifiedAiResponse(prompt = userMsg.text, context = fullInputContext)
 
-                val jTitle = if (response.journey != null) response.journey.title else null
-                val jImportance = if (response.journey != null) response.journey.importance else null
+                var jTitle: String? = null
+                var jImportance: Int? = null
+                var jScore: Double? = null
+                var jIsDuplicate: Boolean? = null
+
+                if (response.journey != null) {
+                    val journeyMemory = response.journey.copy(sourceMessage = userMsg.text)
+                    val journeyRepo = com.example.saathi.data.JourneyRepository()
+                    val existingMemories = journeyRepo.getJourneyMemories(userId)
+
+                    jTitle = journeyMemory.title
+                    jImportance = journeyMemory.importance
+
+                    val newCategoryNorm = journeyRepo.normalizeCategory(journeyMemory.category)
+                    val sameCategoryMemories = existingMemories.filter { existing ->
+                        journeyRepo.normalizeCategory(existing.category) == newCategoryNorm
+                    }
+
+                    var maxScore = 0.0
+                    for (existing in sameCategoryMemories) {
+                        val score = journeyRepo.calculateSimilarityScore(journeyMemory, existing)
+                        if (score > maxScore) {
+                            maxScore = score
+                        }
+                    }
+
+                    jScore = maxScore
+                    jIsDuplicate = maxScore >= 75.0
+
+                    if (!jIsDuplicate) {
+                        journeyRepo.saveJourneyMemory(userId, journeyMemory)
+                    }
+                }
 
                 val botMsgId = if (storageMode == "cloud") chatRef.push().key ?: UUID.randomUUID().toString() else "local_" + System.currentTimeMillis()
                 val botMsg = ChatMessage(
@@ -214,7 +252,9 @@ class ChatViewModel : ViewModel() {
                     timestamp = System.currentTimeMillis(),
                     replyToId = userMsg.id,
                     journeyTitle = jTitle,
-                    journeyImportance = jImportance
+                    journeyImportance = jImportance,
+                    journeySimilarityScore = jScore,
+                    journeyIsDuplicate = jIsDuplicate
                 )
 
                 if (storageMode == "cloud") {
@@ -268,12 +308,6 @@ class ChatViewModel : ViewModel() {
                         )
                     }
                 }
-
-                if (response.journey != null) {
-                    val journeyMemory = response.journey.copy(sourceMessage = userMsg.text)
-                    val journeyRepo = com.example.saathi.data.JourneyRepository()
-                    journeyRepo.saveJourneyMemory(userId, journeyMemory)
-                }
             } catch (e: Exception) {
                 Log.e(TAG, "Chat processing error", e)
             } finally {
@@ -289,12 +323,16 @@ class ChatViewModel : ViewModel() {
             return EntityExtractionResult()
         }
 
-        val keysToTry = listOf("gemni_1", "gemni_2", "gemni_3")
+        val keysToTry = listOf("gemni_1", "gemni_2", "gemni_3", "grok_1", "grok_2", "grok_3")
         val fullInput = "Context: $context\n\nUser Message: $message"
 
         for (keyName in keysToTry) {
             val apiKey = snapshot.child(keyName).value?.toString() ?: continue
-            val rawResponse = callGeminiApiMinimal(apiKey, IDENTIFY_SYSTEM_PROMPT, fullInput)
+            val rawResponse = if (keyName.contains("gemni")) {
+                callGeminiApiMinimal(apiKey, IDENTIFY_SYSTEM_PROMPT, fullInput)
+            } else {
+                callOpenRouterMinimal(apiKey, IDENTIFY_SYSTEM_PROMPT, fullInput)
+            }
 
             if (rawResponse != null) {
                 try {
@@ -321,11 +359,82 @@ class ChatViewModel : ViewModel() {
         return EntityExtractionResult()
     }
 
-    private suspend fun getUnifiedAiResponse(prompt: String, context: String): UnifiedAiResponse {
+    private fun callOpenRouterMinimal(apiKey: String, systemPrompt: String, input: String): String? {
+        val url = "https://openrouter.ai/api/v1/chat/completions"
+        val json = JSONObject().apply {
+            put("model", "openrouter/free")
+            put("messages", org.json.JSONArray().apply {
+                put(JSONObject().apply { put("role", "system"); put("content", systemPrompt) })
+                put(JSONObject().apply { put("role", "user"); put("content", input) })
+            })
+        }
+        return try {
+            val request = Request.Builder().url(url).header("Authorization", "Bearer $apiKey").post(json.toString().toRequestBody("application/json".toMediaType())).build()
+            httpClient.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string() ?: ""
+                    JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+                } else null
+            }
+        } catch (e: Exception) { null }
+    }
+
+    private suspend fun getUnifiedAiResponse(
+        prompt: String,
+        context: String,
+        entityMemoriesText: String = "",
+        lastMessageTimeStr: String = "",
+        userId: String = ""
+    ): UnifiedAiResponse {
+        // STEP A: Try Node.js Backend First
+        try {
+            val apiRequest = com.example.saathi.api.ChatApiRequest(
+                userId = userId,
+                message = prompt,
+                context = context,
+                entityMemories = entityMemoriesText,
+                lastMessageTime = lastMessageTimeStr
+            )
+            val apiResponse = com.example.saathi.api.BackendClient.api.processChat(apiRequest)
+            if (apiResponse.isSuccessful && apiResponse.body() != null) {
+                val body = apiResponse.body()!!
+                val journey = if (body.journey?.save == true) {
+                    JourneyMemory(
+                        title = body.journey.title,
+                        description = body.journey.description,
+                        category = body.journey.category,
+                        importance = body.journey.importance,
+                        createdAt = System.currentTimeMillis(),
+                        normalizedTitle = body.journey.normalizedTitle
+                    )
+                } else null
+
+                val smartMemoryUpdate = if (body.smartMemory?.content != null) {
+                    SmartMemoryUpdate(
+                        content = body.smartMemory.content,
+                        importance = body.smartMemory.importance
+                    )
+                } else null
+
+                return UnifiedAiResponse(
+                    reply = body.reply,
+                    context = body.updatedContext,
+                    entityName = body.entityName,
+                    newAlias = body.newAlias,
+                    smartMemory = smartMemoryUpdate,
+                    journey = journey,
+                    keyUsed = "backend_server"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Backend API call failed, using client failover keys", e)
+        }
+
+        // STEP B: Direct Client Keys Fallback
         val snapshot = try {
             database.getReference("api_keys").get().await()
         } catch (e: Exception) {
-            return UnifiedAiResponse("System busy.", context, null, null, null, null, "none")
+            return UnifiedAiResponse("System busy. Please try again.", context, null, null, null, null, "none")
         }
 
         val keysToTry = listOf("gemni_1", "gemni_2", "gemni_3", "grok_1", "grok_2", "grok_3")
@@ -345,11 +454,12 @@ class ChatViewModel : ViewModel() {
                     val journey = if (json.optJSONObject("journey")?.optBoolean("save") == true) {
                         val jObj = json.getJSONObject("journey")
                         JourneyMemory(
-                            title = jObj.getString("title"),
-                            description = jObj.getString("description"),
-                            category = jObj.getString("category"),
-                            importance = jObj.getInt("importance"),
-                            createdAt = System.currentTimeMillis()
+                            title = jObj.optString("title", ""),
+                            description = jObj.optString("description", ""),
+                            category = jObj.optString("category", "general"),
+                            importance = jObj.optInt("importance", 5),
+                            createdAt = System.currentTimeMillis(),
+                            normalizedTitle = jObj.optString("normalized_title", "")
                         )
                     } else null
 

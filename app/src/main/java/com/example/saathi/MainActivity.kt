@@ -17,7 +17,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import com.example.saathi.screens.ApiTestScreen
 import com.example.saathi.screens.AuthScreen
 import com.example.saathi.screens.OnboardingScreen
 import com.example.saathi.ui.theme.PrimaryPurple
@@ -53,7 +52,6 @@ class MainActivity : ComponentActivity() {
                 }
 
                 when (currentStage) {
-                    "test" -> ApiTestScreen()
                     "onboarding" -> OnboardingScreen(onFinished = { 
                         prefs.edit().putBoolean("onboarding_finished", true).apply()
                         currentStage = "auth" 
